@@ -1,9 +1,7 @@
 import cats.effect.*
-import cats.effect.Resource
 import cats.*
 import cats.effect.implicits.given
 import cats.implicits.given
-import scala.collection.immutable.ListMap
 import scala.collection.immutable.VectorMap
 import cats.effect.kernel.Unique.Token
 import scala.annotation.tailrec
@@ -103,13 +101,16 @@ case class Hooks[F[_]]
 
   // Cant use traverse on VectorMap
   def onCancel: F[Unit] =
-    rollbackCancels.foldLeft(F.unit) { case (acc, (_, r)) => acc >> r }
+    rollbackCancels.foldLeft(F.unit):
+      case (acc, (_, r)) => acc >> r 
 
   def onError(t: Throwable): F[Unit] =
-    rollbackErrs.foldLeft(F.unit) { case (acc, (_, r)) => acc >> r(t) }
+    rollbackErrs.foldLeft(F.unit):
+      case (acc, (_, r)) => acc >> r(t)
 
   def onCompensate: F[Unit] =
-    compensates.foldLeft(F.unit) { case (acc, (_, r)) => acc >> r }
+    compensates.foldLeft(F.unit):
+      case (acc, (_, r)) => acc >> r
 
   def onCommit: F[Unit] = F.uncancelable: poll =>
     def loop(hooks: Hooks[F]): F[Unit] =
