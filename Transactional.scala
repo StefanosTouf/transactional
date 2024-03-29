@@ -4,17 +4,19 @@ import cats.effect.implicits.given
 import cats.implicits.given
 import scala.collection.immutable.VectorMap
 import cats.effect.kernel.Unique.Token
+import cats.effect.std.Console
 import scala.annotation.tailrec
 
 enum Transactional[F[_], +A]:
   def flatMap[B](f: A => Transactional[F, B]): Transactional[F, B] = Bind(this, f)
+  def map[B](f: A => B): Transactional[F, B]  = Bind(this, x => Pure(f(x)))
 
-  def fold[B](f: A => F[B])(using F: MonadCancelThrow[F], U: Unique[F]): F[B] =
+  def run[AA >: A](using F: MonadCancelThrow[F], U: Unique[F], C: Console[F]): F[AA] =
     enum Stack[AA]:
       case Nil extends Stack[A]
       case Frame[AA, BB](head: AA => Transactional[F, BB], tail: Stack[BB]) extends Stack[AA]
 
-    def loop[C](current: Transactional[F, C], stack: Stack[C], hooks: Hooks[F]): F[B] =
+    def loop[C](current: Transactional[F, C], stack: Stack[C], hooks: Hooks[F]): F[A] =
       current match
         case Transact(fc, commit, rollbackErr, rollbackCancel, compensate) =>
           F.uncancelable: poll =>
@@ -29,22 +31,16 @@ enum Transactional[F[_], +A]:
                 .flatMap { newHooks =>
                   stack match
                     case Stack.Nil =>
-                      poll(f(c))
-                        .onCancel(hooks.onCancel)
-                        .onError(hooks.onError(_))
-                        .<*(newHooks.onCommit)
+                      F.pure(c) <* poll(newHooks.onCommit)
 
                     case Stack.Frame(head, tail) =>
-                      loop(head(c), tail, newHooks)
+                      poll(loop(head(c), tail, newHooks)) // This is necessary, but my intuition is struggling with it.
                 }}
 
-        case Pure(c) => F.uncancelable: poll =>
+        case Pure(c) =>
           stack match
             case Stack.Nil =>
-                poll(f(c))
-                  .onCancel(hooks.onCancel)
-                  .onError(hooks.onError(_))
-                  .<*(hooks.onCommit)
+              F.pure(c) <* hooks.onCommit
 
             case Stack.Frame(head, tail) =>
               loop(head(c), tail, hooks)
@@ -53,8 +49,9 @@ enum Transactional[F[_], +A]:
           loop(source, Stack.Frame(f, stack), hooks)
 
     loop(this, Stack.Nil, Hooks(VectorMap(), VectorMap(), VectorMap(), VectorMap()))
+      .widen
 
-  end fold
+  end run
 
   case Transact[F[_], A]
   ( fa            : F[A]
@@ -73,7 +70,7 @@ enum Transactional[F[_], +A]:
 end Transactional
 
 object Transactional {
-  def full[F[_], A]
+  def raw[F[_], A]
   ( fa            : F[A]
   , commit        : Option[A => F[Unit]] = None
   , rollbackErr   : Option[Throwable => F[Unit]] = None
@@ -82,10 +79,19 @@ object Transactional {
   ): Transactional[F, A] =
     Transact(fa,commit,rollbackErr,rollbackCancel, compensate)
 
-  def eval[F[_], A](fa: F[A]): Transactional[F, A] = full(fa)
+  def full[F[_], A]
+  ( fa            : F[A]
+  , commit        : A => F[Unit]
+  , rollbackErr   : Throwable => F[Unit]
+  , rollbackCancel: F[Unit]
+  , compensate    : A => F[Unit]
+  ): Transactional[F, A] =
+    Transact(fa,Some(commit),Some(rollbackErr),Some(rollbackCancel), Some(compensate))
+
+  def eval[F[_], A](fa: F[A]): Transactional[F, A] = raw(fa)
 
   def commit[F[_]: Applicative](commit: F[Unit], compensate: F[Unit]): Transactional[F, Unit] =
-    full(Applicative[F].unit, commit = Some(_ => commit), compensate = Some(_ => compensate))
+    raw(Applicative[F].unit, commit = Some(_ => commit), compensate = Some(_ => compensate))
 }
 /*
   Using VectorMaps here for a Map that preserves insertion order
@@ -113,24 +119,24 @@ case class Hooks[F[_]]
         commits         = commits.updatedWith(token)(_ => commit)
       , rollbackCancels = rollbackCancels.updatedWith(token)(_ => rollbackCancel)
       , rollbackErrs    = rollbackErrs.updatedWith(token)(_ => rollbackErr)
-      , compensates     = rollbackCancels.updatedWith(token)(_ => compensate)
+      , compensates     = compensates.updatedWith(token)(_ => compensate)
       )
 
   // Cant use traverse on VectorMap
   def onCancel: F[Unit] =
-    rollbackCancels.foldLeft(F.unit):
-      case (acc, (_, r)) => acc >> r 
+    rollbackCancels.foldRight(F.unit):
+      case ((_, r), acc) => acc >> r 
 
   def onError(t: Throwable): F[Unit] =
-    rollbackErrs.foldLeft(F.unit):
-      case (acc, (_, r)) => acc >> r(t)
+    rollbackErrs.foldRight(F.unit):
+      case ((_, r), acc) => acc >> r(t)
 
   def onCompensate: F[Unit] =
-    compensates.foldLeft(F.unit):
-      case (acc, (_, r)) => acc >> r
+    compensates.foldRight(F.unit):
+      case ((_, r), acc) => acc >> r
 
-  def onCommit: F[Unit] = F.uncancelable: poll =>
-    def loop(hooks: Hooks[F]): F[Unit] =
+  def onCommit: F[Unit] =
+    def loop(hooks: Hooks[F]): F[Unit] = F.uncancelable: poll =>
       hooks.commits.headOption match
         case None => F.unit
 
@@ -141,12 +147,14 @@ case class Hooks[F[_]]
               .onError(hooks.onError(_) >> hooks.onCompensate) // Does uncancellable work for the onError finalizer?
 
           // If you commit something you can no longer rollback, but you can compensate in case another commit fails
-          commited >> loop:
+          val newHooks: Hooks[F] =
             Hooks( hooks.commits.tail
-                  , hooks.rollbackCancels.removed(token)
-                  , hooks.rollbackErrs.removed(token)
-                  , hooks.compensates.updatedWith(token)(_ => parent.compensates.get(token)) // Does this preserve insertion order?
-                  )
+                 , hooks.rollbackCancels.removed(token)
+                 , hooks.rollbackErrs.removed(token)
+                 , hooks.compensates.updatedWith(token)(_ => parent.compensates.get(token)) // Does this preserve insertion order?
+                 )
+
+          commited >> poll(loop(newHooks))
 
     loop(parent.copy(compensates = VectorMap()))
 
@@ -158,3 +166,36 @@ end Hooks
 extension [F[_]: Applicative, A](of: Option[A => F[Unit]])
   def applyNonEmpty(a: A): Option[F[Unit]] =
     of.map(_(a))
+
+object Main extends IOApp.Simple:
+  import scala.concurrent.duration.DurationInt
+
+  def sleep: IO[Unit] = IO.sleep(500.millis)
+
+  def commit(id: Int) = IO.println(s"Commit $id")
+  def rollbackErr(id: Int) = (t: Throwable) => IO.println(s"RollbackErr $id $t")
+  def rollbackCancel(id: Int) = IO.println(s"RollbackCancel $id")
+  def compensate(id: Int) = IO.println(s"Compensate $id")
+
+  def action(id: Int): IO[Int] = IO.println(id) as id
+
+  def err: IO[Nothing] = IO.raiseError(RuntimeException("Fail!"))
+
+  val tx1: Transactional[IO, Int] =
+    Transactional.full(sleep >> action(1), x => sleep >> commit(x), rollbackErr(1), rollbackCancel(1), compensate)
+  
+  val tx2: Transactional[IO, Int] =
+    Transactional.full(sleep >> action(2), x => sleep >> commit(x), rollbackErr(2), rollbackCancel(2), compensate)
+  
+  val tx3: Transactional[IO, Int] =
+    Transactional.full(sleep >> action(3), x => err >> commit(x), rollbackErr(3), rollbackCancel(3), compensate)
+
+  val tx: Transactional[IO, Int] =
+    for
+      x <- tx1
+      y <- tx2
+      z <- tx3
+    yield x + y + z
+
+  override def run: IO[Unit] =
+    IO.race(tx.run >>= IO.println, IO.sleep(3000.millis) >> IO.println("cancel")).void
