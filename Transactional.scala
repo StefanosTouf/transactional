@@ -7,6 +7,8 @@ import cats.effect.kernel.Unique.Token
 import scala.annotation.tailrec
 
 enum Transactional[F[_], +A]:
+  def flatMap[B](f: A => Transactional[F, B]): Transactional[F, B] = Bind(this, f)
+
   def fold[B](f: A => F[B])(using F: MonadCancelThrow[F], U: Unique[F]): F[B] =
     enum Stack[AA]:
       case Nil extends Stack[A]
@@ -70,6 +72,21 @@ enum Transactional[F[_], +A]:
 
 end Transactional
 
+object Transactional {
+  def full[F[_], A]
+  ( fa            : F[A]
+  , commit        : Option[A => F[Unit]] = None
+  , rollbackErr   : Option[Throwable => F[Unit]] = None
+  , rollbackCancel: Option[F[Unit]] = None
+  , compensate    : Option[A => F[Unit]] = None
+  ): Transactional[F, A] =
+    Transact(fa,commit,rollbackErr,rollbackCancel, compensate)
+
+  def eval[F[_], A](fa: F[A]): Transactional[F, A] = full(fa)
+
+  def commit[F[_]: Applicative](commit: F[Unit], compensate: F[Unit]): Transactional[F, Unit] =
+    full(Applicative[F].unit, commit = Some(_ => commit), compensate = Some(_ => compensate))
+}
 /*
   Using VectorMaps here for a Map that preserves insertion order
   You can probably optimise this by thinking a bit more about it and using different data structures
