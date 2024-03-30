@@ -33,7 +33,7 @@ enum Transactional[F[_], +A]:
                       F.pure(c) <* newHooks.onCommit(poll)
 
                     case Stack.Frame(head, tail) =>
-                      loop(head(c), tail, newHooks) // This is necessary, but my intuition is struggling with it.
+                      loop(head(c), tail, newHooks)
                 }}
 
         case Pure(c) =>
