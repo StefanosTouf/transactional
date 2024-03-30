@@ -28,7 +28,6 @@ case class Hooks[F[_]]
   , compensate    : Option[F[Unit]] = None
   ): F[Hooks[F]] =
     U.unique.map: token =>
-      // Do all these preserve insertion order?
       copy(
         commits         = commits.updatedWith(token)(_ => commit)
       , rollbackCancels = rollbackCancels.updatedWith(token)(_ => rollbackCancel)
@@ -74,4 +73,12 @@ case class Hooks[F[_]]
 
   end onCommit
 
+  def onNonSuccess[A](fa: F[A]): F[A] =
+    fa.onCancel(onCancel)
+      .onError(onError(_))
+
 end Hooks
+
+object Hooks:
+  def empty[F[_]: MonadCancelThrow: Unique]: Hooks[F] =
+    Hooks(VectorMap(), VectorMap(), VectorMap(), VectorMap())
