@@ -3,9 +3,7 @@ package transactional
 import cats.effect.*
 import cats.*
 import cats.implicits.given
-import cats.effect.kernel.Resource.Allocate
-import transactional.Transactional.eval
-import transactional.Transactional.pure
+import transactional.Transactional.*
 import cats.effect.kernel.Resource.ExitCase
 
 enum Transactional[F[_], +A]:
@@ -15,10 +13,14 @@ enum Transactional[F[_], +A]:
   def map[B](f: A => B): Transactional[F, B] =
     Bind(this, x => Pure(f(x)))
 
-  def run[AA >: A](using F: MonadCancelThrow[F], U: Unique[F]): F[AA] = F.uncancelable: poll =>
-    enum Stack[AA]:
+  def run[A2 >: A](using F: MonadCancelThrow[F], U: Unique[F]): F[A2] = F.uncancelable: poll =>
+    enum Stack[Current]:
       case Nil extends Stack[A]
-      case Frame[AA, BB](head: AA => Transactional[F, BB], tail: Stack[BB]) extends Stack[AA]
+
+      case Frame[Current, Next]
+      ( head: Current => Transactional[F, Next]
+      , tail: Stack[Next]
+      ) extends Stack[Current]
 
     def loop[C](current: Transactional[F, C], stack: Stack[C], hooks: Hooks[F]): F[A] =
       current match

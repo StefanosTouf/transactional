@@ -18,7 +18,7 @@ case class Hooks[F[_]]
 , compensates    : VectorMap[Token, F[Unit]]
 )(using F : MonadCancelThrow[F]
 ,       U : Unique[F]
- ):
+):
   parent =>
 
   def add
