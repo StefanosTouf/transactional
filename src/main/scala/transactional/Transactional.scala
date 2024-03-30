@@ -11,7 +11,7 @@ enum Transactional[F[_], +A]:
   def flatMap[B](f: A => Transactional[F, B]): Transactional[F, B] = Bind(this, f)
   def map[B](f: A => B): Transactional[F, B]  = Bind(this, x => Pure(f(x)))
 
-  def run[AA >: A](using F: MonadCancelThrow[F], U: Unique[F]): F[AA] =
+  def run[AA >: A](using F: MonadCancelThrow[F], U: Unique[F]): F[AA] = F.uncancelable: poll =>
     enum Stack[AA]:
       case Nil extends Stack[A]
       case Frame[AA, BB](head: AA => Transactional[F, BB], tail: Stack[BB]) extends Stack[AA]
@@ -19,7 +19,6 @@ enum Transactional[F[_], +A]:
     def loop[C](current: Transactional[F, C], stack: Stack[C], hooks: Hooks[F]): F[A] =
       current match
         case Transact(fc, commit, rollbackErr, rollbackCancel, compensate) =>
-          F.uncancelable: poll =>
             val withRollbacks =
               poll(fc)
                 .onCancel(hooks.onCancel)
@@ -31,16 +30,16 @@ enum Transactional[F[_], +A]:
                 .flatMap { newHooks =>
                   stack match
                     case Stack.Nil =>
-                      F.pure(c) <* poll(newHooks.onCommit)
+                      F.pure(c) <* newHooks.onCommit(poll)
 
                     case Stack.Frame(head, tail) =>
-                      poll(loop(head(c), tail, newHooks)) // This is necessary, but my intuition is struggling with it.
+                      loop(head(c), tail, newHooks) // This is necessary, but my intuition is struggling with it.
                 }}
 
         case Pure(c) =>
           stack match
             case Stack.Nil =>
-              F.pure(c) <* hooks.onCommit
+              F.pure(c) <* hooks.onCommit(poll)
 
             case Stack.Frame(head, tail) =>
               loop(head(c), tail, hooks)

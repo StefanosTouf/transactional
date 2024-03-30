@@ -49,8 +49,8 @@ case class Hooks[F[_]]
     compensates.foldRight(F.unit):
       case ((_, r), acc) => acc >> r
 
-  def onCommit: F[Unit] =
-    def loop(hooks: Hooks[F]): F[Unit] = F.uncancelable: poll =>
+  def onCommit(poll: Poll[F]): F[Unit] =
+    def loop(hooks: Hooks[F]): F[Unit] =
       hooks.commits.headOption match
         case None => F.unit
 
@@ -68,7 +68,7 @@ case class Hooks[F[_]]
                  , hooks.compensates.updatedWith(token)(_ => parent.compensates.get(token)) // Does this preserve insertion order?
                  )
 
-          commited >> poll(loop(newHooks))
+          commited >> loop(newHooks)
 
     loop(parent.copy(compensates = VectorMap()))
 
