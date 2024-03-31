@@ -22,17 +22,17 @@ case class Hooks[F[_]]
   parent =>
 
   def add
-  ( commit        : Option[F[Unit]] = None
-  , rollbackCancel: Option[F[Unit]] = None
-  , rollbackErr   : Option[Throwable => F[Unit]] = None
-  , compensate    : Option[F[Unit]] = None
+  ( commit        : F[Unit]
+  , rollbackCancel: F[Unit]
+  , rollbackErr   : Throwable => F[Unit]
+  , compensate    : F[Unit]
   ): F[Hooks[F]] =
     U.unique.map: token =>
       copy(
-        commits         = commits.updatedWith(token)(_ => commit)
-      , rollbackCancels = rollbackCancels.updatedWith(token)(_ => rollbackCancel)
-      , rollbackErrs    = rollbackErrs.updatedWith(token)(_ => rollbackErr)
-      , compensates     = compensates.updatedWith(token)(_ => compensate)
+        commits         = commits         + (token -> commit)
+      , rollbackCancels = rollbackCancels + (token -> rollbackCancel)
+      , rollbackErrs    = rollbackErrs    + (token -> rollbackErr)
+      , compensates     = compensates     + (token -> compensate)
       )
 
   // Cant use traverse on VectorMap

@@ -26,12 +26,7 @@ enum Transactional[F[_], +A]:
       current match
         case Transact(fc, commit, rollbackErr, rollbackCancel, compensate) =>
           hooks.onNonSuccess(poll(fc)) >>= { c =>
-            val comm       = commit.applyNonEmpty(c)
-            val rollErr    = rollbackErr
-            val rollCancel = rollbackCancel
-            val comp       = compensate.applyNonEmpty(c)
-
-            hooks.add(comm, rollCancel, rollErr, comp) >>= { newHooks =>
+            hooks.add(commit(c), rollbackCancel, rollbackErr, compensate(c)) >>= { newHooks =>
               stack match
                 case Stack.Nil               => newHooks.onCommit(poll) as c
                 case Stack.Frame(head, tail) => loop(head(c), tail, newHooks)
@@ -49,10 +44,10 @@ enum Transactional[F[_], +A]:
           r match
             case Resource.Allocate(resource) =>
               hooks.onNonSuccess(resource(poll)) >>= { case (c, finalizers) =>
-                val commit     = Some(finalizers(ExitCase.Succeeded))
-                val rollErr    = Some((e: Throwable) => finalizers(ExitCase.Errored(e)))
-                val rollCancel = Some(finalizers(ExitCase.Canceled))
-                val comp       = compensate.applyNonEmpty(c)
+                val commit     = finalizers(ExitCase.Succeeded)
+                val rollErr    = (e: Throwable) => finalizers(ExitCase.Errored(e))
+                val rollCancel = finalizers(ExitCase.Canceled)
+                val comp       = compensate(c)
 
                 hooks.add(commit, rollCancel, rollErr, comp) >>= { newHooks =>
                   stack match
@@ -62,7 +57,8 @@ enum Transactional[F[_], +A]:
               }
 
             case Resource.Bind(source, fs) =>
-              loop(Bind(FromResource(source, None), x => FromResource(fs(x), compensate)), stack, hooks)
+              val bound = Bind(FromResource(source, _ => F.unit), x => FromResource(fs(x), compensate))
+              loop(bound, stack, hooks)
 
             case Resource.Pure(a)  => loop(pure(a), stack, hooks)
             case Resource.Eval(fa) => loop(eval(fa), stack, hooks)
@@ -72,10 +68,10 @@ enum Transactional[F[_], +A]:
 
   case Transact[F[_], A]
   ( fa            : F[A]
-  , commit        : Option[A => F[Unit]]
-  , rollbackErr   : Option[Throwable => F[Unit]]
-  , rollbackCancel: Option[F[Unit]]
-  , compensate    : Option[A => F[Unit]]
+  , commit        : A => F[Unit]
+  , rollbackErr   : Throwable => F[Unit]
+  , rollbackCancel: F[Unit]
+  , compensate    : A => F[Unit]
   ) extends Transactional[F, A]
 
   case Bind[F[_], A, +B](source: Transactional[F, A], f: A => Transactional[F, B])
@@ -84,21 +80,12 @@ enum Transactional[F[_], +A]:
   case Pure[F[_], +A](a: A)
     extends Transactional[F, A]
 
-  case FromResource[F[_], A](r: Resource[F, A], compensate: Option[A => F[Unit]])
+  case FromResource[F[_], A](r: Resource[F, A], compensate: A => F[Unit])
     extends Transactional[F, A]
 
 end Transactional
 
 object Transactional:
-  def raw[F[_], A]
-  ( fa            : F[A]
-  , commit        : Option[A => F[Unit]] = None
-  , rollbackErr   : Option[Throwable => F[Unit]] = None
-  , rollbackCancel: Option[F[Unit]] = None
-  , compensate    : Option[A => F[Unit]] = None
-  ): Transactional[F, A] =
-    Transact(fa,commit,rollbackErr,rollbackCancel, compensate)
-
   def full[F[_], A]
   ( fa            : F[A]
   , commit        : A => F[Unit]
@@ -106,19 +93,16 @@ object Transactional:
   , rollbackCancel: F[Unit]
   , compensate    : A => F[Unit]
   ): Transactional[F, A] =
-    raw(fa,Some(commit),Some(rollbackErr),Some(rollbackCancel),Some(compensate))
+    Transact(fa,commit,rollbackErr,rollbackCancel,compensate)
 
-  def eval[F[_], A](fa: F[A]): Transactional[F, A] =
-    raw(fa)
+  def eval[F[_], A](fa: F[A]): Transactional[F, A] = ???
+    // full(fa)
 
-  def commit[F[_]: Applicative](commit: F[Unit], compensate: F[Unit]): Transactional[F, Unit] =
-    raw(Applicative[F].unit, commit = Some(_ => commit), compensate = Some(_ => compensate))
+  def commit[F[_]: Applicative](commit: F[Unit], compensate: F[Unit]): Transactional[F, Unit] = ???
+    // raw(Applicative[F].unit, commit = Some(_ => commit), compensate = Some(_ => compensate))
 
   def pure[F[_], A](a: A): Transactional[F, A] =
     Pure(a)
 
   def resource[F[_], A](res: Resource[F, A], compensate: A => F[Unit]): Transactional[F, A] =
-    FromResource(res, Some(compensate))
-
-  def resourceNoCompensate[F[_], A](res: Resource[F, A]): Transactional[F, A] =
-    FromResource(res, None)
+    FromResource(res, compensate)
