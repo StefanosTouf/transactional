@@ -95,11 +95,11 @@ object Transactional:
   ): Transactional[F, A] =
     Transact(fa,commit,rollbackErr,rollbackCancel,compensate)
 
-  def eval[F[_], A](fa: F[A]): Transactional[F, A] = ???
-    // full(fa)
+  def eval[F[_], A](fa: F[A])(using F: Applicative[F]): Transactional[F, A] =
+    full(fa, _ => F.unit, _ => F.unit, F.unit, _ => F.unit)
 
-  def commit[F[_]: Applicative](commit: F[Unit], compensate: F[Unit]): Transactional[F, Unit] = ???
-    // raw(Applicative[F].unit, commit = Some(_ => commit), compensate = Some(_ => compensate))
+  def commit[F[_]: Applicative](commit: F[Unit], compensate: F[Unit]): Transactional[F, Unit] =
+    full(fa, _ => commit, _ => F.unit, F.unit, _ => compensate)
 
   def pure[F[_], A](a: A): Transactional[F, A] =
     Pure(a)
